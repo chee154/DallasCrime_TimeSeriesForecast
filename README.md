@@ -1,2 +1,2 @@
 # DallasCrime_TimeSeriesForecast
-Building Time Series ML models to analyze, predict and forecast Dallas reported crime.
+Building Time Series ARIMA, ARMA, VAR Models to analyze, predict and forecast Dallas reported crime.
