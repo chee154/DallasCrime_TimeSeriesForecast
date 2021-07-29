@@ -1,0 +1,451 @@
+---
+title: "DS6373_Project_DallasCrime"
+author: "David Wei"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+### -------------------------------- Introduction --------------------------------
+The dataset includes 19 years of Dallas Price Incidents between 2002-07-27 and 2021-03-24 provided publicly by the Dallas Police Department. The data provides reported incidents made by the police and the types of Victims invovled. One thing to note is that the data reflects only the preliminary information supplied to the Dallas Police Department by the reporting parties and may not be 100% accurate since some of the information is subject to change upon further investigation at a later date.
+
+__Data Source:__ https://www.dallasopendata.com/Public-Safety/Police-Incidents/qv6i-rri7
+
+```{r,warning=FALSE,message=FALSE message=FALSE, r,warning=FALSE}
+library(tswge)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(orcutt)
+library(tseries)
+library(vars)
+library(tidyverse)
+library(GGally)
+library(astsa)
+library(nnfor)
+library(forecast)
+library(vars)
+
+
+#NOTE: only run the import at time of export, huge file
+crime_raw = read.csv("C:/Users/David/Google Drive/Masters/Spring 2021 (ML 1 + TS)/DS 6373 - Time Series/Project/Police_Incidents.csv")
+head(crime_raw, 5)
+NROW(crime_raw) #758094
+```
+
+### -------------------------------- Data Tidying & EDA in Python --------------------------------
+A very important thing to note here is that most if not all of the data tidying has been done in Python. The raw police data provided all incident reports at an Incident level and for purposes of doing a time-series analysis, I aggregated and rolled up the data to a daily level which includs all the following preprocessing steps:
+
+1. Removing NA's
+
+2. Subsettting the 100 original attributes into 5 useful time series attributes
+
+3. Converting columns into correct data types
+
+4. One-Hot Encoding the Gender attribute 'Victim Gender'
+
+5. Integer-Encoding the Race attribute 'Victim Race'
+
+6. Aggregating all crimes by counts, Gender by totals, Age by the mean, and Race by the most occuring per day
+
+7. Combine all aggregate dataframes into a final dataframe and export as importabe .csv file into R.
+
+__My Python Code used for Tidying and Aggregation and extracting Aggregate data:__ https://nbviewer.jupyter.org/github/chee154/DallasCrime_TimeSeriesForecast/blob/main/Dallas%20Crime%20_Time%20Series%20Forecast_Tidying.ipynb
+
+
+__Importing Post-Tidy Data File from Python__ 
+```{r,warning=FALSE,message=FALSE}
+crime = read.csv("G:/My Drive/Masters/Spring 2021 (ML 1 + TS)/DS 6373 - Time Series/Project/DallasCrime_Agg.csv")
+head(crime, 5)
+NROW(crime) 
+```
+
+### -------------------------------- Additional Data Tidying & EDA in R  --------------------------------
+```{r,warning=FALSE,message=FALSE}
+str(crime)
+#convert character 'Date' attribute to date type
+crime$Date = as.Date(crime$Date, format =  "%Y-%m-%d")
+head(crime$Date, 1)
+```
+
+__Visualizing Correlations__ 
+```{r,warning=FALSE,message=FALSE}
+ggpairs(crime[2:6]) #matrix of scatter plots
+```
+
+__Plotting Individual Attributes__<br />
+After plotting the crime data, we can see that before the end 2014, there was not a whole lot of data provided. We will remove that from our analysis. Additionally, the latest data (at the time of pulling the data from the source) did not have "complete" data for the latest day (2021-03-24), and so we will almost omit that from our dataset. 
+```{r,warning=FALSE,message=FALSE}
+#plotting original data
+ggplot(crime, aes(x=Date, y=Tot_Crime_Count))+geom_point()+geom_line()+
+  labs(title="Total Crimes in Dallas (2002 - Current)", y="Total Crimes")
+
+#removing outliers prior to end of 2014 and excluding the latest date of '2021-03-24'
+crime_trimmed = crime[43:(dim(crime)[1]-1),]
+min(crime_trimmed$Date)
+max(crime_trimmed$Date)
+NROW(crime_trimmed) #2488
+
+#replotting with outliers removed
+mean(crime_trimmed$Tot_Crime_Count) #176.2721
+
+ggplot(crime_trimmed, aes(x=Date, y=Tot_Crime_Count))+geom_point()+geom_line()+
+  geom_hline(yintercept=176.2721, linetype="dashed", color = "red",size=3)
+
+a = plotts.sample.wge(crime_trimmed$Tot_Crime_Count)
+a$autplt
+
+# max(original_plot$freq)
+# max(original_plot$dbz)
+```
+
+__Testing Stationarity Assumptions - 3 (Correlations)__
+```{r,warning=FALSE,message=FALSE}
+ACF_1st_half = crime_trimmed[1:(floor(dim(crime)[1]/2)),]
+NROW(ACF_1st_half)
+ACF_2nd_half = crime_trimmed[dim(ACF_1st_half)[1]:dim(crime_trimmed)[1],]
+NROW(ACF_2nd_half)
+
+par(mfrow=c(1,2))
+acf(ACF_1st_half$Tot_Crime_Count)
+acf(ACF_2nd_half$Tot_Crime_Count)
+```
+__Constructing ASE Rolling Window Function__
+```{r}
+Rolling_Window_ASE = function(series, trainingSize, horizon, s, d, phis, thetas)
+{
+ASEHolder = numeric()
+for( i in 1:(length(series)-(trainingSize + horizon) + 1))
+{
+  forecasts = fore.aruma.wge(series[i:(i+(trainingSize-1))],phi = phis, theta = thetas, s = s, d = d,n.ahead = horizon, plot=FALSE)
+  ASE = mean((series[(trainingSize+i):(trainingSize+ i + (horizon) - 1)] - forecasts$f)^2)
+  ASEHolder[i] = ASE
+}
+ASEHolder
+hist(ASEHolder)
+WindowedASE = mean(ASEHolder)
+
+print("The Summary Statistics for the Rolling Window ASE Are:")
+print(summary(ASEHolder))
+print(paste("The Rolling Window ASE is: ",WindowedASE))
+return(WindowedASE)
+}
+```
+
+### -------------------------------- Univariate Model Analysis - Assumptions --------------------------------
+Given the nonstationarity assumptions of our data, we will first model the data applying only a high-pass filter which results in a stationary model with constant mean. 
+```{r,warning=FALSE,message=FALSE}
+#Dickey-Fuller test to see if there is root
+adf.test(crime_trimmed$Tot_Crime_Count)
+
+#applying d=1
+d1=artrans.wge(crime_trimmed$Tot_Crime_Count,phi.tr=1)
+plotts.sample.wge(d1)$autplt
+```
+##### __Addressing Potential Seasonality__<br />
+Per the spectral density, there still does appear to be some evidence of seasonality at freq=[.13,.28,.43] which was inherited over from the original realization. After adjusting for seasonality, we found that what we thought was seasonality was in actuality, stochastic white noise. 
+```{r,warning=FALSE,message=FALSE}
+#potential seasonality periods:
+s1 = trunc(1/.13)
+s2 = trunc(1/.28)
+s3 = trunc(1/.43)
+s1 #7
+s2 #3
+s3 #2
+#differencing the sesonality appears to result in stochastic white noise
+s1_7=c(rep(0,6),1)
+s2_3=c(0,0,1)
+s3_2=c(0,1)
+s1_7
+s2_3
+s3_2
+d1.2=artrans.wge(d1,phi.tr=s3_2)
+plotts.sample.wge(d1.2)$autplt
+```
+##### __Validating White Noise Assumption__<br />
+The Ljung-Box test provides strong evidence of white noise with a p-value = 0. 
+```{r,warning=FALSE,message=FALSE}
+#running AIC5 to suggest coefficients on nonstationary model
+aic5.wge(d1, p=0:10, q=0:5) #p=9, q=1
+aic5.wge(d1,p=0:10, q=0:5,type='bic') 
+
+#running AIC5 to suggest coefficients on stationary model
+aic5.wge(crime_trimmed$Tot_Crime_Count, p=0:10, q=0:5) #p=5, q=5
+aic5.wge(crime_trimmed$Tot_Crime_Count,p=0:10, q=0:5,type='bic') #p=5, q=5 
+
+#calculating ML estiamtes for a stationary and nonstatioanry model
+m1_est = est.arma.wge(d1,p = 9, q=1)
+m1_est_2 = est.arma.wge(crime_trimmed$Tot_Crime_Count,p = 5, q=5)
+mult.wge(m1_est_2$phi)
+
+# confirming white noise after applying a ordered difference d=1 that data is white noise
+m1_est_diff = artrans.wge(d1,m1_est$phi)
+ljung.wge(m1_est_diff)$pval
+ljung.wge(m1_est_diff, K = 48)$pval
+```
+
+### -------------------------------- Modeling - Univariate Models --------------------------------
+Using the stationary model, we will fit 2 ARMA models, one in the short term (60 days) and the other in the long term horizon (3 years). 
+##### __Model 1 ARMA(5,5) - Forecasting Short Horizon (60 days) __<br />
+```{r,warning=FALSE,message=FALSE}
+#short term forecast + ASE
+m1_ARMA55_forecast_short = fore.arma.wge(crime_trimmed$Tot_Crime_Count,phi = m1_est_2$phi,theta=m1_est_2$theta, n.ahead = 60,limits = T,lastn = FALSE)
+
+# short ASE
+m1_short_ASE = mean((crime_trimmed$Tot_Crime_Coun[(length(crime_trimmed$Tot_Crime_Count)-60+1):length(crime_trimmed$Tot_Crime_Count)] - m1_ARMA55_forecast_short$f)^2)
+m1_short_ASE #852.4636
+
+# Rolling ASE using 40% of total dataset
+Rolling_Window_ASE(crime_trimmed$Tot_Crime_Count,trainingSize = ceiling(length(crime_trimmed$Tot_Crime_Count)*.4), horizon = 60, s = 0, d=0, phis = m1_est_2$phi, thetas=m1_est_2$theta) #473.4389
+```
+
+##### __Model 1 ARMA(5,5) - Forecasting Long Horizon (3 years) __<br />
+```{r,warning=FALSE,message=FALSE}
+#long term forecast
+m1_ARMA55_forecast_long = fore.arma.wge(crime_trimmed$Tot_Crime_Count,phi = m1_est_2$phi,theta=m1_est_2$theta, n.ahead = 1095,limits = T,lastn = FALSE)
+
+# long ASE
+m1_long_ASE = mean((crime_trimmed$Tot_Crime_Coun[(length(crime_trimmed$Tot_Crime_Count)-1095+1):length(crime_trimmed$Tot_Crime_Count)] - m1_ARMA55_forecast_long$f)^2)
+m1_long_ASE #777.2503
+
+# Rolling ASE using 40% of total dataset
+Rolling_Window_ASE(crime_trimmed$Tot_Crime_Count,trainingSize = ceiling(length(crime_trimmed$Tot_Crime_Count)*.4), horizon = 1095, s = 0, d=0, phis = m1_est_2$phi, thetas=m1_est_2$theta) #897.8244
+```
+#### __Model 2 - ARIMA(9,1,1) - Forecasting Short Horizon (60 days)__<br />
+We will next build an ARIMA model using the differenced stationary model from our ARMA model with a difference (d=1) component applied.
+```{r,warning=FALSE,message=FALSE}
+# short term 
+m2_ARIMA_911_forecast_short = fore.aruma.wge(crime_trimmed$Tot_Crime_Count,d=1, phi = m1_est$phi,theta=m1_est$theta, n.ahead = 60,limits = T,lastn = FALSE)
+
+# short ASE
+m2_short_ASE = mean((crime_trimmed$Tot_Crime_Count[(length(crime_trimmed$Tot_Crime_Count)-60+1):length(crime_trimmed$Tot_Crime_Count)] - m2_ARIMA_911_forecast_short$f)^2)
+m2_short_ASE #888.2925
+
+# short Rolling ASE using 40% of total dataset
+Rolling_Window_ASE(crime_trimmed$Tot_Crime_Count,trainingSize = ceiling(length(crime_trimmed$Tot_Crime_Count)*.4), horizon = 60, s = 0, d=1, phis = m1_est$phi, thetas=m1_est$theta) #518.2834
+```
+#### __Model 2 - ARIMA(9,1,1) - Forecasting Long Horizon (3 years)__<br />
+```{r,warning=FALSE,message=FALSE}
+# long term
+m2_ARIMA_911_forecast_long = fore.aruma.wge(crime_trimmed$Tot_Crime_Count,d=1,s=0,phi = m1_est$phi,theta=m1_est$theta, n.ahead = 1095,limits = T,lastn = FALSE)
+
+# long ASE
+m2_long_ASE = mean((crime_trimmed$Tot_Crime_Count[(length(crime_trimmed$Tot_Crime_Count)-1095+1):length(crime_trimmed$Tot_Crime_Count)] - m2_ARIMA_911_forecast_long$f)^2)
+m2_long_ASE #866.2923
+
+# long Rolling ASE using 40% of total dataset
+m2_long_RASE = Rolling_Window_ASE(crime_trimmed$Tot_Crime_Count,trainingSize = ceiling(length(crime_trimmed$Tot_Crime_Count)*.4), horizon = 1095, s = 0, d=1, phis = m1_est$phi, thetas=m1_est$theta) #1304.745
+```
+
+
+##### __Model 3 - Signal-Plus Noise - Forecasting Short Horizon (60 days)__<br />
+Fitting a Signal-Plus Noise using the Cochrane-Orcutt method that fits a linear model that adjusts for serial correlation found in the differenced model. Unfortunately, we found that.
+```{r,warning=FALSE,message=FALSE}
+#fitting regression line
+x=crime_trimmed$Tot_Crime_Count
+t = seq(1,dim(crime_trimmed)[1],1)
+d= lm(x~t,data=crime_trimmed)
+options(scipen = 999)
+summary(d)
+#plotting residuals
+plotts.wge(d$residuals)
+
+#finding residuals from fitted regression line
+x.z=x-d$coefficients[1]-d$coefficients[2]*t
+ar.z=aic.wge(x.z,p=0:6,type='bic')
+ar.z$vara
+
+#fitting ARMA model to the residuals
+y.trans = artrans.wge(x, phi.tr=ar.z$phi)
+t.trans = artrans.wge(t, phi.tr=ar.z$phi)
+signoise_fit = lm(y.trans~t.trans)
+summary(signoise_fit)
+```
+
+##### __Model 3 - Signal-Plus Noise - Forecasting Short Horizon (60 days)__<br />
+```{r,warning=FALSE,message=FALSE}
+#forecasting using Signal-Plus Noise Model
+sigplusnoise_forecast_short=fore.sigplusnoise.wge(crime_trimmed$Tot_Crime_Count,max.p=2,n.ahead=60)
+
+m3_short_ASE = mean((crime_trimmed$Tot_Crime_Count[(length(crime_trimmed$Tot_Crime_Count)-60+1):length(crime_trimmed$Tot_Crime_Count)] - sigplusnoise_forecast_short$f)^2)
+m3_short_ASE 
+```
+
+##### __Model 3 - Signal-Plus Noise - Forecasting Long Horizon (3 years)__<br />
+```{r,warning=FALSE,message=FALSE}
+sigplusnoise_forecast_long=fore.sigplusnoise.wge(crime_trimmed$Tot_Crime_Count,max.p=2,n.ahead=1095)
+
+m3_long_ASE = mean((crime_trimmed$Tot_Crime_Count[(length(crime_trimmed$Tot_Crime_Count)-1095+1):length(crime_trimmed$Tot_Crime_Count)] - sigplusnoise_forecast_long$f)^2)
+m3_long_ASE #731.6251
+```
+
+
+### -------------------------------- Modeling - Multivariate - Vector Autoregressive (VAR) --------------------------------
+__Model 4 - Multivariate Assumption Checking__
+```{r,warning=FALSE,message=FALSE}
+NROW(crime_trimmed)
+ggpairs(crime_trimmed[2:6]) #matrix of scatter plots
+
+#forecasting feature variables
+#checking assumptions of all exogenous variables
+plotts.sample.wge(crime_trimmed$Victim_Female)
+plotts.sample.wge(crime_trimmed$Victim_Male)
+plotts.sample.wge(crime_trimmed$Victim_Age)
+plotts.sample.wge(crime_trimmed$Victim_Race)
+
+# #forecasting Victim_Female
+# aic5.wge(crime_trimmed$Victim_Female,p=0:10, q=0:5) #p=5 ,q=4
+# est_female = est.arma.wge(crime_trimmed$Victim_Female, p=5, q=4)
+# female_short_forecast = fore.arma.wge(crime_trimmed$Victim_Female,phi=est_female$phi, theta=est_female$theta,n.ahead = 60)
+# female_long_forecast = fore.arma.wge(crime_trimmed$Victim_Female,phi=est_female$phi, theta=est_female$theta,n.ahead = 1095)
+# 
+# #forecasting Victim_Age
+# aic5.wge(crime_trimmed$Victim_Age,p=0:10, q=0:5) #p=4 ,q=3
+# est_age = est.arma.wge(crime_trimmed$Victim_Age, p=4, q=3)
+# age_short_forecast = fore.arma.wge(crime_trimmed$Victim_age,phi=est_age$phi, theta=est_age$theta,n.ahead = 60)
+# age_long_forecast = fore.arma.wge(crime_trimmed$Victim_age,phi=est_age$phi, theta=est_age$theta,n.ahead = 1095)
+# 
+# 
+# #forecasting Victim_Race
+# aic5.wge(crime_trimmed$Victim_Race,p=0:10, q=0:5) #p=5 ,q=1
+# est_race = est.arma.wge(crime_trimmed$Victim_Race, p=5, q=1)
+# race_short_forecast = fore.arma.wge(crime_trimmed$Victim_race,phi=est_race$phi, theta=est_race$theta,n.ahead = 60)
+# race_long_forecast = fore.arma.wge(crime_trimmed$Victim_race,phi=est_race$phi, theta=est_race$theta,n.ahead = 1095)
+
+crime = crime_trimmed$Tot_Crime_Count
+female = crime_trimmed$Victim_Female
+male = crime_trimmed$Victim_Male
+age = crime_trimmed$Victim_Age
+race = crime_trimmed$Victim_Race
+
+#differencing to make exogenous variables stationary
+crime_d1 = artrans.wge(crime_trimmed$Tot_Crime_Count,1)
+female_d1 = artrans.wge(crime_trimmed$Victim_Female,1)
+male_d1 = artrans.wge(crime_trimmed$Victim_Male,1)
+age_d1 = artrans.wge(crime_trimmed$Victim_Age,1)
+race_d1 = artrans.wge(crime_trimmed$Victim_Race,1)
+
+#checking differenced variables for stationarity
+plotts.sample.wge(crime_d1, arlimits=TRUE)
+plotts.sample.wge(female_d1, arlimits=TRUE)
+plotts.sample.wge(male_d1, arlimits=TRUE)
+plotts.sample.wge(age_d1, arlimits=TRUE)
+plotts.sample.wge(race_d1, arlimits=TRUE)
+```
+
+__Model 4 - Vector Autoregressive (VAR) - Forecasting Short Horizon (60 days)__
+```{r,warning=FALSE,message=FALSE}
+#adding time variable
+?mlp
+time_diff = data.frame(time = seq(1,2487,1))
+time = data.frame(time = seq(1,2488,1))
+
+#running VARSelect on differenced data
+VARselect(cbind(crime_d1, female_d1,age_d1,race_d1),lag.max = 10, type = "const") #7
+#running VARSelect on nonstationary data
+VARselect(cbind(crime, female,age,race),lag.max = 10, type = "const") #7
+
+#nonstationary VAR
+crimeVAR = VAR(cbind(crime, female,age, race), type="both",p=7)
+AIC(crimeVAR) #56292.65
+#nonstationary VAR with time
+crimeVAR_time = VAR(cbind(crime, female,age, race), type="both",p=7,exogen=time)
+AIC(crimeVAR_time) #56300.65
+#statioanry VAR model
+crimediffVAR = VAR(cbind(crime_d1, female_d1,age_d1,race_d1), type="both",p=7)
+AIC(crimediffVAR) #56991
+#stationary VAR model with time
+crimediffVAR_time = VAR(cbind(crime_d1, female_d1,age_d1,race_d1), type="both",p=7,exogen=time_diff)
+AIC(crimediffVAR_time) #56999
+
+#forecasting short horizon nostationary VAR since it is VAR model with lowest AIC
+VAR_preds_short = predict(crimeVAR,n.ahead =60)
+head(VAR_preds_short$fcst$crime,5)
+
+# nonstationary VAR short horizon forecast
+plot(seq(1,2488,1), crime, type = "l",xlim = c(1,2548), ylab = "Total Crime", main = "VAR Model - 60 Day Forecast")
+lines(seq(2489,2548,1), VAR_preds_short$fcst$crime[,1], type = "l", col = "red")
+
+# nonstationary ASE
+m4_VAR_short_ASE = mean((crime[(length(crime)-60+1):length(crime)] - VAR_preds_short$fcst$crime[,1])^2)
+m4_VAR_short_ASE #1144.896
+
+```
+
+__Model 4 - Vector Autoregressive (VAR) - Forecasting Long Horizon (3 Years)__
+```{r,warning=FALSE,message=FALSE}
+VAR_preds_long = predict(crimeVAR,n.ahead =1095)
+head(VAR_preds_long$fcst$crime,5)
+
+# nonstationary VAR long horizon forecast
+plot(seq(1,2488,1), crime, type = "l",xlim = c(1,3583), ylab = "Total Crime", main = "VAR Model - 3 Year Forecast")
+lines(seq(2489,3583,1), VAR_preds_long$fcst$crime[,1], type = "l", col = "red")
+
+# nonstationary ASE
+m4_VAR_long_ASE = mean((crime[(length(crime)-1095+1):length(crime)] - VAR_preds_long$fcst$crime[,1])^2)
+m4_VAR_long_ASE #691.8346
+```
+
+### -------------------------------- Modeling - Neural Network Models --------------------------------
+__Model 5 - Neural Network (NN) - Univariate__
+We will next model a Neural Network (NN) model using rep of 20. A thing to note here is that the MLP model is highly inconsistent and and computationally taxing. Therefore, only 
+
+```{r,warning=FALSE,message=FALSE}
+#set seed
+set.seed(42)
+
+#subsetting data
+crime_small_short = ts(crime_trimmed$Tot_Crime_Count[1:2428])
+crime_small_long = ts(crime_trimmed$Tot_Crime_Count[1:1393])
+
+# Univariate MLP Model
+# create short horizon MLP model 
+fit_mlp_crime_short = mlp(crime_small_short)
+fit_mlp_crime_short
+plot(fit_mlp_crime_short)
+# create long horizon MLP model 
+fit_mlp_crime_long = mlp(crime_small_long,rep=5)
+fit_mlp_crime_long
+plot(fit_mlp_crime_long)
+
+#forecast short horizon model
+fore_mlp_crime_short = forecast(fit_mlp_crime_short, h = 60)
+plot(fore_mlp_crime_short)
+#forecast long horizon model
+fore_mlp_crime_long = forecast(fit_mlp_crime_long, h = 1095)
+plot(fore_mlp_crime_long)
+
+#short horizon ASE
+m5_MLP_short_ASE = mean((crime[(length(crime)-60+1):length(crime)]-fore_mlp_crime_short$mean)^2)
+m5_MLP_short_ASE #875.0553
+
+#long horizon ASE
+m5_MLP_long_ASE = mean((crime[(length(crime)-1095+1):length(crime)]-fore_mlp_crime_long$mean)^2)
+m5_MLP_long_ASE #950.2433
+```
+
+### -------------------------------- Modeling - Ensemble Models --------------------------------
+__Model 6 - Ensemble Model__
+```{r,warning=FALSE,message=FALSE}
+#creating ensemble model using best performing model from each of the prior 5 models
+ensemble_short  = (m1_ARMA55_forecast_short$f + sigplusnoise_forecast_short$f + VAR_preds_short$fcst$crime[,1] + fore_mlp_crime_short$mean)/4
+ensemble_long  = (m1_ARMA55_forecast_long$f + sigplusnoise_forecast_long$f + VAR_preds_long$fcst$crime[,1] + fore_mlp_crime_long$mean)/4
+
+#plot short term horizon
+plot(seq(1,2488,1), crime, type = "l",xlim = c(1,2548), ylab = "Total Crime", main = "Ensemble Model - 60 Day Forecast")
+lines(seq(2489,2548,1), ensemble_short, type = "l", col = "red")
+
+#plot long term horizon
+plot(seq(1,2488,1), crime, type = "l",xlim = c(1,3583), ylab = "Total Crime", main = "Ensemble Model - 3 Year Forecast")
+lines(seq(2489,3583,1), ensemble_long, type = "l", col = "red")
+
+# short term ASE
+m6_Ensemble_short_ASE = mean((crime[(length(crime)-60+1):length(crime)] - ensemble_short)^2)
+m6_Ensemble_short_ASE #964.7032
+
+# short term ASE
+m6_Ensemble_long_ASE = mean((crime[(length(crime)-1095+1):length(crime)] - ensemble_long)^2)
+m6_Ensemble_long_ASE #595.3352
+```
